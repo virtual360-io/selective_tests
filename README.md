@@ -263,6 +263,64 @@ between tests, which zeros the counters. If the suite is also running
 with `REPORT_TEST_COVERAGE=true` (SimpleCov), SimpleCov's final report
 will come out empty. Use one flag at a time.
 
+## Reusable GitHub Action
+
+The repository ships a composite Action at the root (`action.yml`) that
+encapsulates the "compute affected tests for a PR" step. Consumers add a
+single step to their PR workflow:
+
+```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0   # required for `git diff origin/<base>...HEAD`
+
+- id: selective
+  uses: virtual360-io/selective_tests@main
+  with:
+    base-ref: develop
+
+- name: Run only the affected tests
+  if: steps.selective.outputs.test-count != '0' && steps.selective.outputs.manifest-found == 'true'
+  run: bundle exec rails test ${{ steps.selective.outputs.tests }}
+
+- name: Fall back to full suite when manifest is missing
+  if: steps.selective.outputs.manifest-found == 'false'
+  run: bundle exec rails test
+```
+
+### Inputs
+
+| Input            | Default                        | Description                                                              |
+|------------------|--------------------------------|--------------------------------------------------------------------------|
+| `base-ref`       | `develop`                      | Branch to diff against; the action runs `git diff origin/<base>...HEAD`. |
+| `changed-files`  | (empty)                        | Newline-separated diff override; bypasses the git diff when set.         |
+| `manifest-dir`   | `.selective_tests`             | Manifest path relative to the repo root.                                 |
+| `bundler-cmd`    | `bundle exec selective-tests`  | Command used to invoke the CLI.                                          |
+| `strict`         | `false`                        | When `true`, fail if any input file is unknown to the manifest.          |
+| `output-file`    | (empty)                        | Optional file path to dump the selected tests, one per line.             |
+
+### Outputs
+
+| Output            | Description                                                                                           |
+|-------------------|-------------------------------------------------------------------------------------------------------|
+| `tests`           | Newline-separated list of selected test files (empty if none).                                        |
+| `test-count`      | Number of test files selected. `0` means no tests are affected.                                       |
+| `manifest-found`  | `true` if at least one `run-*.ndjson` was found; `false` means the caller must fall back.             |
+| `unknown-count`   | Number of diff files unknown to the manifest (conservatively skipped).                                |
+| `diff-file-count` | Number of files in the diff after applying `changed-files` or running `git diff`.                     |
+
+### Behavior
+
+- `manifest-found=false` → the action emits empty `tests`, `test-count=0`,
+  and a workflow warning. The caller decides whether to skip or run the full
+  suite.
+- Empty diff → `test-count=0` and a notice; nothing to run.
+- Test files in the input (matching `*_test.rb`) are returned verbatim, so
+  PRs that introduce a brand-new test still pick it up.
+- Unknown files (not in the manifest, not a test) are listed in the job
+  log inside a `Files unknown to the manifest` group. They do not fail the
+  step unless `strict: true`.
+
 ## Daily manifest refresh via cron
 
 The [`selective-tests-cache.yml`](../../.github/workflows/selective-tests-cache.yml)

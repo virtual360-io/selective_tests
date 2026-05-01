@@ -1,0 +1,202 @@
+name: 'Selective Tests'
+description: >-
+  Compute the Minitest tests affected by a diff using the selective_tests
+  manifest committed at the project root. Outputs a newline-separated list of
+  test files for the calling workflow to feed into its test runner.
+author: 'Virtual360'
+branding:
+  icon: 'filter'
+  color: 'green'
+
+inputs:
+  base-ref:
+    description: >-
+      Branch to diff against. The action computes
+      `git diff --name-only origin/<base-ref>...HEAD`.
+    required: false
+    default: 'develop'
+
+  changed-files:
+    description: >-
+      Optional newline- or space-separated list of changed files. When set,
+      the action skips the git diff and uses this list directly. Useful when
+      the caller already has the diff (e.g. `tj-actions/changed-files`).
+    required: false
+    default: ''
+
+  manifest-dir:
+    description: >-
+      Path (relative to the repository root) to the manifest directory written
+      by `TRACK_TEST_FILES=true bundle exec rails test`.
+    required: false
+    default: '.selective_tests'
+
+  bundler-cmd:
+    description: >-
+      Command used to invoke the CLI. Override when the gem is not installed
+      via bundler (e.g. `selective-tests` if installed globally) or when
+      the caller bundles with a non-default Gemfile.
+    required: false
+    default: 'bundle exec selective-tests'
+
+  strict:
+    description: >-
+      When `true`, the action fails if the diff contains any file not present
+      in the manifest. When `false` (default), unknown files are reported on
+      the job log but do not fail the step.
+    required: false
+    default: 'false'
+
+  output-file:
+    description: >-
+      Optional path where the list of selected tests will be written, one per
+      line. Useful for piping into a downstream `xargs` step.
+    required: false
+    default: ''
+
+outputs:
+  tests:
+    description: >-
+      Newline-separated list of selected test files. Empty when no tests are
+      affected, when the manifest is missing, or when the diff is empty.
+    value: ${{ steps.select.outputs.tests }}
+
+  test-count:
+    description: >-
+      Number of test files selected. `0` means no tests are affected and the
+      caller may skip the test job entirely.
+    value: ${{ steps.select.outputs.test-count }}
+
+  manifest-found:
+    description: >-
+      `true` when at least one `run-*.ndjson` was found under `manifest-dir`.
+      `false` means the caller should fall back to running the full suite.
+    value: ${{ steps.select.outputs.manifest-found }}
+
+  unknown-count:
+    description: >-
+      Number of files in the diff that are unknown to the manifest. They are
+      conservatively skipped; bump this number is a signal that the manifest
+      is stale.
+    value: ${{ steps.select.outputs.unknown-count }}
+
+  diff-file-count:
+    description: >-
+      Number of files in the input diff (after git or `changed-files`).
+    value: ${{ steps.select.outputs.diff-file-count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: select
+      shell: bash
+      env:
+        BASE_REF: ${{ inputs.base-ref }}
+        CHANGED_FILES: ${{ inputs.changed-files }}
+        MANIFEST_DIR: ${{ inputs.manifest-dir }}
+        BUNDLER_CMD: ${{ inputs.bundler-cmd }}
+        STRICT: ${{ inputs.strict }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        set -euo pipefail
+
+        emit() {
+          local key="$1"
+          local value="$2"
+          {
+            echo "${key}<<__SELECTIVE_TESTS_EOF__"
+            printf '%s\n' "${value}"
+            echo "__SELECTIVE_TESTS_EOF__"
+          } >> "${GITHUB_OUTPUT}"
+        }
+
+        emit_scalar() {
+          echo "$1=$2" >> "${GITHUB_OUTPUT}"
+        }
+
+        # ── manifest probe ────────────────────────────────────────────────
+        manifest_found=false
+        if compgen -G "${MANIFEST_DIR}/run-*.ndjson" > /dev/null; then
+          manifest_found=true
+        fi
+        emit_scalar manifest-found "${manifest_found}"
+
+        if [ "${manifest_found}" = "false" ]; then
+          echo "::warning::No manifest under '${MANIFEST_DIR}'. Caller should run the full suite."
+          emit tests ""
+          emit_scalar test-count 0
+          emit_scalar unknown-count 0
+          emit_scalar diff-file-count 0
+          exit 0
+        fi
+
+        # ── diff source ───────────────────────────────────────────────────
+        diff_file="$(mktemp)"
+        if [ -n "${CHANGED_FILES}" ]; then
+          printf '%s\n' "${CHANGED_FILES}" | tr ' ' '\n' | sed '/^$/d' > "${diff_file}"
+        else
+          if ! git rev-parse --verify "origin/${BASE_REF}" >/dev/null 2>&1; then
+            echo "::error::origin/${BASE_REF} is not available. Did you `actions/checkout@v4` with `fetch-depth: 0`?"
+            exit 1
+          fi
+          git diff --name-only "origin/${BASE_REF}...HEAD" > "${diff_file}"
+        fi
+
+        diff_count="$(wc -l < "${diff_file}" | tr -d ' ')"
+        emit_scalar diff-file-count "${diff_count}"
+
+        if [ "${diff_count}" = "0" ]; then
+          echo "::notice::Diff is empty — no tests selected."
+          emit tests ""
+          emit_scalar test-count 0
+          emit_scalar unknown-count 0
+          exit 0
+        fi
+
+        # ── selection ─────────────────────────────────────────────────────
+        unknown_log="$(mktemp)"
+        tests_file="$(mktemp)"
+        strict_flag=""
+        if [ "${STRICT}" = "true" ]; then
+          strict_flag="--strict"
+        fi
+
+        # `selective-tests select` reads filenames from stdin when no positional
+        # args are given and writes the affected tests to stdout.
+        set +e
+        # shellcheck disable=SC2086
+        ${BUNDLER_CMD} select ${strict_flag} \
+          --manifest-dir "${MANIFEST_DIR}" \
+          < "${diff_file}" \
+          > "${tests_file}" \
+          2> "${unknown_log}"
+        cli_status=$?
+        set -e
+
+        unknown_count="$(sed -n 's/^selective-tests: \([0-9]\{1,\}\) file(s) not in manifest:.*/\1/p' "${unknown_log}" | head -n 1)"
+        unknown_count="${unknown_count:-0}"
+        emit_scalar unknown-count "${unknown_count}"
+
+        if [ "${cli_status}" -ne 0 ]; then
+          cat "${unknown_log}" >&2
+          echo "::error::selective-tests exited with status ${cli_status}"
+          exit "${cli_status}"
+        fi
+
+        if [ -s "${unknown_log}" ]; then
+          echo "::group::Files unknown to the manifest"
+          cat "${unknown_log}"
+          echo "::endgroup::"
+        fi
+
+        sort -u "${tests_file}" -o "${tests_file}"
+        test_count="$(wc -l < "${tests_file}" | tr -d ' ')"
+        emit_scalar test-count "${test_count}"
+
+        if [ -n "${OUTPUT_FILE}" ]; then
+          mkdir -p "$(dirname "${OUTPUT_FILE}")"
+          cp "${tests_file}" "${OUTPUT_FILE}"
+        fi
+
+        emit tests "$(cat "${tests_file}")"
+        echo "::notice::Selected ${test_count} test file(s) from a diff of ${diff_count} file(s)."

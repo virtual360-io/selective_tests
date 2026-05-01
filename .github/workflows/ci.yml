@@ -81,6 +81,32 @@ jobs:
           echo "Asking CLI which tests touch $first_lib"
           bundle exec exe/selective-tests select "$first_lib"
 
+      - name: Dogfood the action against the freshly-built manifest
+        id: dogfood
+        uses: ./
+        with:
+          base-ref: main
+          changed-files: |
+            lib/selective_tests/selector.rb
+            lib/selective_tests/manifest.rb
+          manifest-dir: .selective_tests
+          bundler-cmd: bundle exec exe/selective-tests
+
+      - name: Assert dogfood selected at least one test
+        run: |
+          set -e
+          echo "manifest-found:  ${{ steps.dogfood.outputs.manifest-found }}"
+          echo "diff-file-count: ${{ steps.dogfood.outputs.diff-file-count }}"
+          echo "test-count:      ${{ steps.dogfood.outputs.test-count }}"
+          if [ "${{ steps.dogfood.outputs.manifest-found }}" != "true" ]; then
+            echo "::error::Dogfood expected manifest-found=true"
+            exit 1
+          fi
+          if [ "${{ steps.dogfood.outputs.test-count }}" = "0" ]; then
+            echo "::error::Dogfood expected at least one test selected for selector.rb/manifest.rb"
+            exit 1
+          fi
+
       - name: Commit and push manifest
         run: |
           git add -f .selective_tests
