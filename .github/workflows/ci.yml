@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.7
+          bundler-cache: true
+
+      - name: Run tests
+        run: bundle exec rake test
+
+  manifest:
+    name: Manifest generation (dogfood)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.4.7
+          bundler-cache: true
+
+      - name: Run tests with TRACK_TEST_FILES=true
+        env:
+          TRACK_TEST_FILES: 'true'
+        run: bundle exec rake test
+
+      - name: Verify manifest was generated
+        run: |
+          set -e
+          if ! ls .selective_tests/run-*.ndjson >/dev/null 2>&1; then
+            echo "::error::No .selective_tests/run-*.ndjson file was generated"
+            exit 1
+          fi
+          line_count=$(cat .selective_tests/run-*.ndjson | wc -l)
+          echo "Manifest entries: $line_count"
+          if [ "$line_count" -eq 0 ]; then
+            echo "::error::Manifest is empty"
+            exit 1
+          fi
+          echo "Sample entries:"
+          head -3 .selective_tests/run-*.ndjson
+
+      - name: Verify CLI selects affected tests
+        run: |
+          set -e
+          first_lib=$(ls lib/selective_tests/*.rb | head -1)
+          echo "Asking CLI which tests touch $first_lib"
+          bundle exec exe/selective-tests select "$first_lib"
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: selective-tests-manifest
+          path: .selective_tests/
+          retention-days: 7
