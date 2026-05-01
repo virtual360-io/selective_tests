@@ -2,7 +2,6 @@
 /vendor/bundle/
 /Gemfile.lock
 /.ruby-version
-/.selective_tests/
 /coverage/
 /pkg/
 /tmp/

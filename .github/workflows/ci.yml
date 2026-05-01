@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # daily at 06:00 UTC (~03:00 BRT) — keep the manifest fresh.
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -24,16 +27,33 @@ jobs:
         run: bundle exec rake test
 
   manifest:
-    name: Manifest generation (dogfood)
+    name: Refresh manifest
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: 3.4.7
           bundler-cache: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Wipe stale manifest
+        run: |
+          mkdir -p .selective_tests
+          rm -f .selective_tests/run-*.ndjson
 
       - name: Run tests with TRACK_TEST_FILES=true
         env:
@@ -53,8 +73,6 @@ jobs:
             echo "::error::Manifest is empty"
             exit 1
           fi
-          echo "Sample entries:"
-          head -3 .selective_tests/run-*.ndjson
 
       - name: Verify CLI selects affected tests
         run: |
@@ -63,10 +81,19 @@ jobs:
           echo "Asking CLI which tests touch $first_lib"
           bundle exec exe/selective-tests select "$first_lib"
 
-      - name: Upload manifest artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: selective-tests-manifest
-          path: .selective_tests/run-*.ndjson
-          retention-days: 7
-          if-no-files-found: error
+      - name: Commit and push manifest
+        run: |
+          git add -f .selective_tests
+          if git diff --cached --quiet; then
+            echo "::notice::No manifest changes"
+            exit 0
+          fi
+          git commit -m "chore: refresh selective_tests manifest [skip ci]"
+          for attempt in 1 2 3 4; do
+            git pull --rebase origin main && \
+              git push origin main && exit 0
+            echo "::warning::push attempt $attempt failed, retrying after backoff"
+            sleep $(( attempt * 5 ))
+          done
+          echo "::error::Failed to push manifest after 4 attempts"
+          exit 1
