@@ -67,5 +67,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: selective-tests-manifest
-          path: .selective_tests/
+          path: .selective_tests/run-*.ndjson
           retention-days: 7
+          if-no-files-found: error
