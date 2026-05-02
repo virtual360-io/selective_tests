@@ -81,10 +81,120 @@ Rules:
 - a file unknown to the manifest is reported on `stderr` and skipped
   (use `--strict` to fail).
 
+## Resolving the run mode for a CI job
+
+`select` is the lower-level primitive: "given these files, which tests
+touch them?". For CI you usually want one extra layer on top: the
+**mode** decision (`full`, `selective`, or `skip`). That's `resolve`.
+
+```bash
+selective-tests resolve \
+  --changed-files changed.txt \
+  --manifest-dir .selective_tests \
+  --broad-patterns ci/broad_patterns.txt \
+  --ignore-patterns ci/ignore_patterns.txt \
+  --format github >> "$GITHUB_OUTPUT"
+```
+
+Inputs:
+
+- `--changed-files FILE` — one path per line. Also accepts positional
+  args or stdin.
+- `--broad-patterns FILE` / `--broad-pattern REGEX` — if **any** changed
+  file matches one of these, the resolver returns `mode=full` and stops.
+  Use this for files that invalidate the manifest (schema, gemspec,
+  test_helper, config, the manifest itself, the CI workflow, etc.).
+- `--ignore-patterns FILE` / `--ignore-pattern REGEX` — files dropped
+  before resolution. Use this for changes that never trigger tests
+  (markdown, docs, README/CHANGELOG, .txt). If **all** changed files
+  match, the resolver returns `mode=skip`.
+- `--manifest-dir DIR` — where to read `manifest.json` from. If the file
+  is missing or empty, the resolver returns `mode=full` (safe fallback).
+- `--test-pattern REGEXP` — overrides what counts as a test file
+  (default `_test\.rb\z`).
+- `--format lines|github|json` — see below.
+
+Pattern files use one regex per line, `#` starts a comment. Anchors
+matter: `\Adb/migrate/` is a prefix match, `db/migrate/` would also
+match `vendor/foo/db/migrate/` files.
+
+### Decision flow
+
+The resolver applies these checks in order — first match wins:
+
+| # | Check                                                       | Result               |
+|---|-------------------------------------------------------------|----------------------|
+| 1 | No changed files at all                                     | `skip / no-changes`  |
+| 2 | Any changed file matches a `broad_pattern`                  | `full / broad-change:<file>` |
+| 3 | After dropping `ignore_pattern` matches, list is empty      | `skip / docs-only`   |
+| 4 | Manifest is missing or empty                                | `full / no-manifest` |
+| 5 | A changed file is not a test file and not in the manifest   | `full / unknown-files` |
+| 6 | Mapping yielded zero tests                                  | `skip / no-tests-affected` |
+| 7 | Otherwise                                                   | `selective / mapped` |
+
+### Test-file invariant
+
+When a changed file is itself a test file (matches `--test-pattern`),
+**at minimum the test file itself is returned**. This is true even when
+the manifest has never seen that test file before — covering both
+"PR modifies an existing test" and "PR introduces a brand-new test".
+
+This invariant is the gem's responsibility, not the consumer's. You can
+rely on it without sprinkling test-file detection in your CI scripts.
+
+The invariant does **not** override the safety fallbacks: if a changed
+file is unknown to the manifest (and not a test file), the resolver
+still returns `mode=full` because it can't tell what other tests that
+file might affect. In `full` mode every test runs, including the test
+file you just touched, so the invariant still holds end-to-end.
+
+### Output formats
+
+`--format lines` (default) — tests on stdout, mode/reason on stderr:
+
+```
+$ selective-tests resolve --changed-files changed.txt
+selective-tests: mode=selective reason=mapped
+test/services/foo_test.rb
+test/services/bar_test.rb
+```
+
+`--format github` — ready to append to `$GITHUB_OUTPUT`:
+
+```
+mode=selective
+reason=mapped
+test_count=2
+tests<<SELECTIVE_EOF
+test/services/foo_test.rb
+test/services/bar_test.rb
+SELECTIVE_EOF
+```
+
+`--format json` — single JSON object on stdout:
+
+```json
+{"mode":"selective","reason":"mapped","test_count":2,"tests":["test/services/bar_test.rb","test/services/foo_test.rb"],"unknown":[]}
+```
+
+### Why patterns live in the consumer, not the gem
+
+The broad/ignore patterns are CI policy specific to each repo:
+`vendor/<engine>/test/test_helper.rb` is meaningful in V360, irrelevant
+in a single-app repo; `.selective_tests/` is the manifest directory in
+the default layout but a project may relocate it; some repos use
+`db/structure.sql` instead of `db/schema.rb`. The gem stays unaware of
+these conventions and accepts them as input.
+
+A typical layout: store the patterns next to the workflow that uses
+them (e.g., `.github/selective_tests/broad_patterns.txt`).
+
 ## Commands
 
 ```
 selective-tests select [files...]   Print the affected tests (one per line)
+selective-tests resolve [files...]  Decide run mode (full|selective|skip) for
+                                    changed files, honoring broad/ignore patterns.
 selective-tests consolidate         Merge run-*.ndjson into manifest.json
                                     (file -> [tests]). Pass --prune to delete
                                     the run files after writing.
@@ -100,6 +210,14 @@ Main flags for `select`:
 - `--strict` — exit with code 2 if any input file is unknown
 - `-0`, `--null` — use `\0` as the output separator (for `xargs -0`)
 
+Main flags for `resolve` (see "Resolving the run mode" above for full details):
+
+- `--changed-files FILE` — one path per line; also accepts positional args or stdin
+- `--broad-pattern REGEX` (repeatable) / `--broad-patterns FILE`
+- `--ignore-pattern REGEX` (repeatable) / `--ignore-patterns FILE`
+- `--manifest-dir DIR`, `--root DIR`, `--test-pattern REGEXP`
+- `--format lines|github|json` — output style
+
 ## Architecture
 
 Source layout:
@@ -114,6 +232,7 @@ lib/
     ├── view_tracker.rb             # ActionView/ActionMailer notifications subscriber
     ├── manifest.rb                 # reads/writes .selective_tests/
     ├── selector.rb                 # maps diff -> tests to run
+    ├── resolver.rb                 # adds mode (full/selective/skip) + broad/ignore patterns
     ├── minitest.rb                 # Minitest plugin (hooks + install)
     └── cli.rb                      # OptionParser + subcommands
 exe/
@@ -254,6 +373,23 @@ The "test file in the input is returned as-is" rule covers two cases: a
 PR that modifies an existing test, or a PR that introduces a brand-new
 test that hasn't shown up in any manifest yet.
 
+### `Resolver`
+Wraps `Selector` with a CI-policy layer. Given changed files, broad
+patterns, ignore patterns, and a manifest, returns a `Result` with:
+
+- `mode` — `full`, `selective`, or `skip`;
+- `reason` — short tag explaining why (`no-changes`, `broad-change:<file>`,
+  `docs-only`, `no-manifest`, `unknown-files`, `no-tests-affected`,
+  `mapped`);
+- `tests` — the list to run (empty when `skip` or `full`);
+- `unknown` — files unknown to the manifest (only populated when the
+  `unknown-files` fallback triggers).
+
+The decision flow is described in
+[Resolving the run mode for a CI job](#resolving-the-run-mode-for-a-ci-job).
+The class is the gem's stance on **what to run when something
+changes** — pure decision logic, no I/O beyond reading the manifest.
+
 ### `MinitestIntegration` (`selective_tests/minitest`)
 The integration point. `require 'selective_tests/minitest'` calls
 `MinitestIntegration.install!` automatically when
@@ -287,10 +423,10 @@ this is fine.
 
 ### `CLI`
 `OptionParser`-based, no external dependency. Subcommands: `select`,
-`consolidate`, `info`, `clear`, `help`. `stdout` / `stderr` / `stdin`
-are injected for testing — no subprocess required. Returns an exit code
-(`EXIT_OK`, `EXIT_USAGE`, `EXIT_STRICT_UNKNOWN`); `exe/selective-tests`
-is just `exit(SelectiveTests::CLI.run(ARGV))`.
+`resolve`, `consolidate`, `info`, `clear`, `help`. `stdout` / `stderr`
+/ `stdin` are injected for testing — no subprocess required. Returns
+an exit code (`EXIT_OK`, `EXIT_USAGE`, `EXIT_STRICT_UNKNOWN`);
+`exe/selective-tests` is just `exit(SelectiveTests::CLI.run(ARGV))`.
 
 ### Collection flow, step by step
 
@@ -315,6 +451,18 @@ is just `exit(SelectiveTests::CLI.run(ARGV))`.
 3. The CLI prints the tests on STDOUT (one per line, or `\0`-separated
    with `-0`) and the unknown files on STDERR.
 4. Exit = 0 always, except for `--strict` with unknown input (= 2).
+
+### Resolution flow, step by step
+
+1. `selective-tests resolve` reads changed files from `--changed-files`,
+   positional args, or stdin; loads broad/ignore patterns from flags
+   and/or files.
+2. `Resolver#resolve` walks the
+   [decision flow](#decision-flow) and returns a `Result(mode, reason,
+   tests, unknown)`. `Selector` is only invoked at step 5.
+3. The CLI emits the result in the requested format (`lines`, `github`,
+   or `json`).
+4. Exit = 0 always.
 
 ## Setup in V360
 
