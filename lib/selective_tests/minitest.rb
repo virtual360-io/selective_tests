@@ -2,6 +2,7 @@
 
 require 'selective_tests'
 require 'selective_tests/coverage_tracker'
+require 'selective_tests/view_tracker'
 require 'selective_tests/manifest'
 
 module SelectiveTests
@@ -13,6 +14,7 @@ module SelectiveTests
         return if @installed
 
         SelectiveTests::CoverageTracker.start
+        SelectiveTests::ViewTracker.start
 
         manifest = SelectiveTests::Manifest.new(
           SelectiveTests.config.manifest_dir,
@@ -30,12 +32,14 @@ module SelectiveTests
     module TestHooks
       def before_setup
         SelectiveTests::CoverageTracker.consume!
+        SelectiveTests::ViewTracker.consume!
         super
       end
 
       def after_teardown
         super
         files = SelectiveTests::CoverageTracker.consume!
+        files.concat(SelectiveTests::ViewTracker.consume!)
         path = SelectiveTests::MinitestIntegration.send(:source_file_for, self)
         SelectiveTests::MinitestIntegration.writer&.write(path, files) if path
       end

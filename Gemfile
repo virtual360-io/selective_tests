@@ -6,3 +6,7 @@ gemspec
 
 gem 'minitest', '~> 5.14'
 gem 'rake'
+
+group :test do
+  gem 'activesupport', '~> 7.0'
+end

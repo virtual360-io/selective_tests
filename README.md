@@ -111,6 +111,7 @@ lib/
     ├── version.rb
     ├── configuration.rb            # paths and defaults
     ├── coverage_tracker.rb         # stdlib Coverage wrapper
+    ├── view_tracker.rb             # ActionView/ActionMailer notifications subscriber
     ├── manifest.rb                 # reads/writes .selective_tests/
     ├── selector.rb                 # maps diff -> tests to run
     ├── minitest.rb                 # Minitest plugin (hooks + install)
@@ -146,6 +147,38 @@ Thin wrapper over stdlib `Coverage`:
 That's what enables per-test tracking: `consume!` in `before_setup`
 discards leftover counters, `consume!` in `after_teardown` returns the
 exact set of files touched by that test.
+
+### `ViewTracker`
+Stdlib `Coverage` only sees `.rb` files, so view templates
+(`.html.erb`, `.text.erb`, `.json.jbuilder`, …) and mailer templates
+would never make it into the manifest. `ViewTracker` closes that gap by
+subscribing to `ActiveSupport::Notifications` events emitted by
+ActionView and ActionMailer:
+
+- `render_template.action_view`
+- `render_partial.action_view`
+- `render_layout.action_view`
+- `render_collection.action_view`
+- `render_template.action_mailer`
+
+Each event's `payload[:identifier]` is a full template path; the
+subscriber records the path in a process-global, mutex-protected `Set`.
+Public surface mirrors `CoverageTracker`:
+
+- `available?` — true when `ActiveSupport::Notifications` is loaded
+  (i.e., a Rails app); the gem stays inert outside Rails.
+- `start` — installs the subscribers (idempotent).
+- `consume!` — returns the deduped set of paths captured since the last
+  call **and** clears it.
+- `stop` — unsubscribes from every event (used by tests).
+
+`MinitestIntegration` calls `ViewTracker.consume!` next to
+`CoverageTracker.consume!` in both `before_setup` (drain) and
+`after_teardown` (collect + write), and merges the two lists before
+handing them to the writer. The writer's `relativize` step drops
+identifiers outside `project_root`, so gem-shipped templates (Devise,
+ActionMailbox, etc.) are filtered out automatically. `render plain:`
+and `render inline:` produce no usable file path and are skipped.
 
 ### `Manifest`
 Two on-disk shapes coexist under `<manifest_dir>`:
