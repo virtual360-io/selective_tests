@@ -24,7 +24,7 @@ module SelectiveTests
       consolidated_path = File.join(@dir, CONSOLIDATED_FILE)
       return build_reverse_from_ndjson unless File.exist?(consolidated_path)
 
-      parsed = JSON.parse(File.read(consolidated_path))
+      parsed = parse_lenient_json(File.read(consolidated_path))
       return {} unless parsed.is_a?(Hash)
 
       parsed.transform_values { |tests| Array(tests).uniq.sort }
@@ -44,7 +44,7 @@ module SelectiveTests
       sorted = build_reverse_from_ndjson.sort.to_h
       FileUtils.mkdir_p(@dir)
       path = File.join(@dir, CONSOLIDATED_FILE)
-      File.write(path, JSON.generate(sorted) + "\n")
+      File.write(path, format_manifest(sorted))
       run_files.each { |f| File.delete(f) } if prune
       path
     end
@@ -64,6 +64,21 @@ module SelectiveTests
     end
 
     private
+
+    def format_manifest(hash)
+      lines = ['{']
+      hash.each do |file, tests|
+        lines << "#{file.to_json}: ["
+        Array(tests).uniq.sort.each { |test| lines << "#{test.to_json}," }
+        lines << '],'
+      end
+      lines << "}\n"
+      lines.join("\n")
+    end
+
+    def parse_lenient_json(content)
+      JSON.parse(content.gsub(/,(\s*[\]\}])/, '\1'))
+    end
 
     def build_reverse_from_ndjson
       forward = {}

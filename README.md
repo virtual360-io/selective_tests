@@ -158,15 +158,26 @@ Two on-disk shapes coexist under `<manifest_dir>`:
    ```
 
 2. **Consolidated**, the canonical artifact, a single
-   `manifest.json` shaped as an inverted index `file -> [tests]`:
+   `manifest.json` shaped as an inverted index `file -> [tests]`,
+   written in a diff-friendly layout (one entry per line, trailing
+   commas everywhere) so that adding/removing a test or a file
+   produces minimal, conflict-free diffs:
 
-   ```json
+   ```
    {
-     "app/models/user.rb": ["test/models/user_test.rb", ...],
-     "lib/shared.rb":      ["test/a_test.rb", "test/b_test.rb"],
-     ...
+   "app/models/user.rb": [
+   "test/models/user_test.rb",
+   ],
+   "lib/shared.rb": [
+   "test/a_test.rb",
+   "test/b_test.rb",
+   ],
    }
    ```
+
+   The trailing commas are not strict JSON; the gem reads it via a
+   lenient parser that strips them before `JSON.parse`. Standard JSON
+   is also accepted on read.
 
 The consolidated form is what gets committed; the NDJSONs are
 intermediate, written in parallel during the run.

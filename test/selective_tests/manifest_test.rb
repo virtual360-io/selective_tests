@@ -118,13 +118,60 @@ class ManifestTest < Minitest::Test
     assert_equal File.join(@dir, 'manifest.json'), path
     assert @manifest.consolidated?
 
-    written = JSON.parse(File.read(path))
     assert_equal(
       {
         'app/a.rb'      => ['test/a_test.rb'],
         'app/shared.rb' => ['test/a_test.rb', 'test/b_test.rb']
       },
-      written
+      @manifest.reverse_index
+    )
+  end
+
+  def test_consolidate_writes_diff_friendly_format_with_trailing_commas
+    FileUtils.mkdir_p(@dir)
+    File.open(File.join(@dir, 'run-1.ndjson'), 'w') do |f|
+      f.puts JSON.generate(test: 'test/a_test.rb', files: ['app/shared.rb', 'app/a.rb'])
+      f.puts JSON.generate(test: 'test/b_test.rb', files: ['app/shared.rb'])
+    end
+
+    path = @manifest.consolidate
+    contents = File.read(path)
+
+    expected = <<~MANIFEST
+      {
+      "app/a.rb": [
+      "test/a_test.rb",
+      ],
+      "app/shared.rb": [
+      "test/a_test.rb",
+      "test/b_test.rb",
+      ],
+      }
+    MANIFEST
+
+    assert_equal expected, contents
+  end
+
+  def test_index_reads_diff_friendly_manifest_with_trailing_commas
+    FileUtils.mkdir_p(@dir)
+    File.write(File.join(@dir, 'manifest.json'), <<~MANIFEST)
+      {
+      "app/a.rb": [
+      "test/a_test.rb",
+      ],
+      "app/shared.rb": [
+      "test/a_test.rb",
+      "test/b_test.rb",
+      ],
+      }
+    MANIFEST
+
+    assert_equal(
+      {
+        'app/a.rb'      => ['test/a_test.rb'],
+        'app/shared.rb' => ['test/a_test.rb', 'test/b_test.rb']
+      },
+      @manifest.reverse_index
     )
   end
 

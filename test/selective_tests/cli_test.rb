@@ -97,14 +97,14 @@ class CLITest < Minitest::Test
     assert_match(/wrote .*manifest\.json/, out)
     assert File.exist?(manifest_json)
 
-    parsed = JSON.parse(File.read(manifest_json))
+    manifest = SelectiveTests::Manifest.new(@dir, project_root: @root)
     assert_equal(
       {
         'app/bar.rb'    => ['test/bar_test.rb'],
         'app/foo.rb'    => ['test/foo_test.rb'],
         'lib/shared.rb' => ['test/foo_test.rb']
       },
-      parsed
+      manifest.reverse_index
     )
   end
 
