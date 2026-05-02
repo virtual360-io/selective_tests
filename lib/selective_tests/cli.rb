@@ -11,6 +11,8 @@ module SelectiveTests
     EXIT_USAGE = 1
     EXIT_STRICT_UNKNOWN = 2
 
+    COMMANDS = %w[select consolidate info clear].freeze
+
     def self.run(argv, stdout: $stdout, stderr: $stderr, stdin: $stdin)
       new(stdout:, stderr:, stdin:).run(argv)
     end
@@ -24,21 +26,21 @@ module SelectiveTests
     def run(argv)
       argv = argv.dup
       command = argv.shift
-      case command
-      when 'select' then cmd_select(argv)
-      when 'info'   then cmd_info(argv)
-      when 'clear'  then cmd_clear(argv)
-      when nil, 'help', '--help', '-h' then print_help
-      else
-        @stderr.puts("selective-tests: unknown command #{command.inspect}")
-        print_help(io: @stderr)
-        EXIT_USAGE
-      end
+      return print_help if command.nil? || %w[help --help -h].include?(command)
+      return run_command(command, argv) if COMMANDS.include?(command)
+
+      @stderr.puts("selective-tests: unknown command #{command.inspect}")
+      print_help(io: @stderr)
+      EXIT_USAGE
     end
 
     private
 
-    def cmd_select(argv)
+    def run_command(command, argv)
+      send(command, argv)
+    end
+
+    def select(argv)
       options = base_options.merge(strict: false, null: false, test_pattern: nil)
       parser = OptionParser.new do |o|
         o.banner = 'Usage: selective-tests select [files...]'
@@ -68,7 +70,24 @@ module SelectiveTests
       EXIT_OK
     end
 
-    def cmd_info(argv)
+    def consolidate(argv)
+      options = base_options.merge(prune: false)
+      OptionParser.new do |o|
+        o.banner = 'Usage: selective-tests consolidate [--prune]'
+        o.on('--manifest-dir DIR', String) { |v| options[:manifest_dir] = v }
+        o.on('--root DIR', String)         { |v| options[:root] = v }
+        o.on('--prune', 'Delete run-*.ndjson files after writing manifest.json') do
+          options[:prune] = true
+        end
+      end.parse(argv)
+
+      manifest = build_manifest(options)
+      path = manifest.consolidate(prune: options[:prune])
+      @stdout.puts "wrote #{path}"
+      EXIT_OK
+    end
+
+    def info(argv)
       options = base_options
       OptionParser.new do |o|
         o.banner = 'Usage: selective-tests info'
@@ -88,7 +107,7 @@ module SelectiveTests
       EXIT_OK
     end
 
-    def cmd_clear(argv)
+    def clear(argv)
       options = base_options
       OptionParser.new do |o|
         o.banner = 'Usage: selective-tests clear'
@@ -130,6 +149,8 @@ module SelectiveTests
         Commands:
           select [files...]   Print tests affected by the given files (one per line).
                               Reads from stdin when no positional args are given.
+          consolidate         Merge run-*.ndjson into manifest.json (inverted index:
+                              file -> [tests]). Pass --prune to delete the run files.
           info                Print manifest statistics.
           clear               Delete recorded manifest data.
 

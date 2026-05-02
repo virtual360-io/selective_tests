@@ -89,6 +89,51 @@ class CLITest < Minitest::Test
     assert_empty Dir.glob(File.join(@dir, 'run-*.ndjson'))
   end
 
+  def test_consolidate_writes_manifest_json
+    code, out, _ = run_cli(['consolidate', '--root', @root])
+
+    assert_equal 0, code
+    manifest_json = File.join(@dir, 'manifest.json')
+    assert_match(/wrote .*manifest\.json/, out)
+    assert File.exist?(manifest_json)
+
+    parsed = JSON.parse(File.read(manifest_json))
+    assert_equal(
+      {
+        'app/bar.rb'    => ['test/bar_test.rb'],
+        'app/foo.rb'    => ['test/foo_test.rb'],
+        'lib/shared.rb' => ['test/foo_test.rb']
+      },
+      parsed
+    )
+  end
+
+  def test_consolidate_with_prune_deletes_run_files
+    code, _, _ = run_cli(['consolidate', '--root', @root, '--prune'])
+
+    assert_equal 0, code
+    assert_empty Dir.glob(File.join(@dir, 'run-*.ndjson'))
+    assert File.exist?(File.join(@dir, 'manifest.json'))
+  end
+
+  def test_select_uses_consolidated_manifest_when_present
+    File.write(
+      File.join(@dir, 'manifest.json'),
+      JSON.generate('app/only_in_manifest.rb' => ['test/only_in_manifest_test.rb'])
+    )
+
+    code, out, _ = run_cli(['select', '--root', @root, 'app/only_in_manifest.rb'])
+
+    assert_equal 0, code
+    assert_equal "test/only_in_manifest_test.rb\n", out
+  end
+
+  def test_help_lists_consolidate
+    _, out, _ = run_cli(['help'])
+
+    assert_match(/consolidate/, out)
+  end
+
   def test_help_command
     code, out, _ = run_cli(['help'])
 

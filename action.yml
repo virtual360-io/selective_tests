@@ -69,8 +69,9 @@ outputs:
 
   manifest-found:
     description: >-
-      `true` when at least one `run-*.ndjson` was found under `manifest-dir`.
-      `false` means the caller should fall back to running the full suite.
+      `true` when `manifest-dir` contains either a consolidated `manifest.json`
+      or at least one `run-*.ndjson`. `false` means the caller should fall back
+      to running the full suite.
     value: ${{ steps.select.outputs.manifest-found }}
 
   unknown-count:
@@ -116,7 +117,7 @@ runs:
 
         # ── manifest probe ────────────────────────────────────────────────
         manifest_found=false
-        if compgen -G "${MANIFEST_DIR}/run-*.ndjson" > /dev/null; then
+        if [ -f "${MANIFEST_DIR}/manifest.json" ] || compgen -G "${MANIFEST_DIR}/run-*.ndjson" > /dev/null; then
           manifest_found=true
         fi
         emit_scalar manifest-found "${manifest_found}"

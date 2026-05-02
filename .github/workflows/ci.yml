@@ -53,14 +53,14 @@ jobs:
       - name: Wipe stale manifest
         run: |
           mkdir -p .selective_tests
-          rm -f .selective_tests/run-*.ndjson
+          rm -f .selective_tests/run-*.ndjson .selective_tests/manifest.json
 
       - name: Run tests with TRACK_TEST_FILES=true
         env:
           TRACK_TEST_FILES: 'true'
         run: bundle exec rake test
 
-      - name: Verify manifest was generated
+      - name: Verify run files were generated
         run: |
           set -e
           if ! ls .selective_tests/run-*.ndjson >/dev/null 2>&1; then
@@ -68,9 +68,26 @@ jobs:
             exit 1
           fi
           line_count=$(cat .selective_tests/run-*.ndjson | wc -l)
-          echo "Manifest entries: $line_count"
+          echo "Run entries: $line_count"
           if [ "$line_count" -eq 0 ]; then
-            echo "::error::Manifest is empty"
+            echo "::error::Run files are empty"
+            exit 1
+          fi
+
+      - name: Consolidate run files into manifest.json
+        run: bundle exec exe/selective-tests consolidate --prune
+
+      - name: Verify manifest.json was generated
+        run: |
+          set -e
+          if [ ! -s .selective_tests/manifest.json ]; then
+            echo "::error::No .selective_tests/manifest.json was generated"
+            exit 1
+          fi
+          file_count=$(ruby -rjson -e 'puts JSON.parse(File.read(".selective_tests/manifest.json")).size')
+          echo "Files mapped in manifest: $file_count"
+          if [ "$file_count" -eq 0 ]; then
+            echo "::error::manifest.json is empty"
             exit 1
           fi
 

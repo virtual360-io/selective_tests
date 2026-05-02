@@ -13,28 +13,35 @@ The gem does two things:
 ## Workflow
 
 ```
-┌──────────────────────┐     ┌─────────────────────────────┐     ┌────────────────────────┐
-│  run suite on main   │ --> │ .selective_tests/run-*.ndjson│ --> │ selective-tests select │
-│ TRACK_TEST_FILES=true│     │  (test → files map)          │     │  --> tests for the PR  │
-└──────────────────────┘     └─────────────────────────────┘     └────────────────────────┘
+┌──────────────────────┐    ┌─────────────────────────────┐    ┌────────────────────────────┐    ┌────────────────────────┐
+│  run suite on main   │ -> │ .selective_tests/run-*.ndjson│ -> │ selective-tests consolidate│ -> │ selective-tests select │
+│ TRACK_TEST_FILES=true│    │  (raw, per-process)          │    │  --> .selective_tests/     │    │  --> tests for the PR  │
+│                      │    │                              │    │      manifest.json         │    │                        │
+└──────────────────────┘    └─────────────────────────────┘    └────────────────────────────┘    └────────────────────────┘
 ```
 
 End-to-end flow:
 
 ```bash
-# 1) Once (or periodically, in develop's CI): collect the manifest
+# 1) Once (or periodically, in develop's CI): collect raw run files
 TRACK_TEST_FILES=true bundle exec rails test
 
-# 2) On any PR: run only the tests affected by the diff
+# 2) Consolidate the per-process NDJSONs into a deduplicated manifest.json
+bundle exec selective-tests consolidate --prune
+
+# 3) On any PR: run only the tests affected by the diff
 git diff --name-only origin/develop...HEAD \
   | bundle exec selective-tests select \
   | xargs -r bundle exec rails test
 ```
 
-Step (1) populates `.selective_tests/`. Step (2) reads those files,
-builds a reverse index `file -> tests`, and prints only the tests that
-touch any file in the diff. A test file in the input is returned as-is;
-files unknown to the manifest are reported on `stderr`.
+Step (1) populates `.selective_tests/run-*.ndjson` (one per worker
+process, with the per-test file lists). Step (2) merges them into a
+single `manifest.json` shaped as an inverted index `file -> [tests]`,
+which is what gets versioned. Step (3) reads `manifest.json` and prints
+only the tests that touch any file in the diff. A test file in the
+input is returned as-is; files unknown to the manifest are reported on
+`stderr`.
 
 ## Collecting the manifest
 
@@ -49,9 +56,10 @@ NDJSON file at `.selective_tests/run-<pid>.ndjson`. Each line:
 {"test":"test/models/user_test.rb","files":["app/models/user.rb","..."],"recorded_at":1714502400}
 ```
 
-Recommended setup: collect on `develop`'s CI (after each merge) and
-version the consolidated result, or stash it in a bucket that CI pulls
-down before running `select`.
+Recommended setup: collect on `develop`'s CI (or on a daily cron),
+run `selective-tests consolidate --prune` to turn the run files into
+`manifest.json`, and version that single JSON file. Consumer PRs only
+need `manifest.json` — the `run-*.ndjson` are intermediate artifacts.
 
 ## Selecting tests for a diff
 
@@ -77,6 +85,9 @@ Rules:
 
 ```
 selective-tests select [files...]   Print the affected tests (one per line)
+selective-tests consolidate         Merge run-*.ndjson into manifest.json
+                                    (file -> [tests]). Pass --prune to delete
+                                    the run files after writing.
 selective-tests info                Print manifest statistics
 selective-tests clear               Delete the manifest files
 ```
@@ -137,28 +148,52 @@ discards leftover counters, `consume!` in `after_teardown` returns the
 exact set of files touched by that test.
 
 ### `Manifest`
-Persisted as **NDJSON** (one JSON per line). Each run writes to
-`<manifest_dir>/run-<pid>.ndjson`, with lines shaped like:
+Two on-disk shapes coexist under `<manifest_dir>`:
 
-```json
-{"test":"test/models/user_test.rb","files":["app/models/user.rb",...],"recorded_at":1714502400}
-```
+1. **Raw**, written during a run, NDJSON one-per-line at
+   `run-<pid>.ndjson`:
 
-Two classes:
+   ```json
+   {"test":"test/models/user_test.rb","files":["app/models/user.rb",...],"recorded_at":1714502400}
+   ```
 
-- `Manifest`: points at `dir` + `project_root`. Exposes `entries` (reads
-  every `run-*.ndjson`, returns `test -> files`; the latest line for a
-  given test wins on collisions) and `clear!` (deletes the
-  `run-*.ndjson` files).
-- `Manifest::Writer`: opens `run-<Process.pid>.ndjson` in append mode per
-  worker. Since each forked worker has a distinct PID, **no locking is
-  required** — different files, no contention. The writer normalizes
-  paths to be relative to the project root and drops anything outside it
-  (gems, `/usr/lib`, etc.).
+2. **Consolidated**, the canonical artifact, a single
+   `manifest.json` shaped as an inverted index `file -> [tests]`:
 
-NDJSON was chosen because it is append-friendly (no need to re-read and
-rewrite the whole JSON for each test) and it pairs nicely with the
-PID-based filename for trivial parallelism.
+   ```json
+   {
+     "app/models/user.rb": ["test/models/user_test.rb", ...],
+     "lib/shared.rb":      ["test/a_test.rb", "test/b_test.rb"],
+     ...
+   }
+   ```
+
+The consolidated form is what gets committed; the NDJSONs are
+intermediate, written in parallel during the run.
+
+Classes:
+
+- `Manifest`: points at `dir` + `project_root`. Public methods:
+  - `reverse_index` — reads `manifest.json` if present, otherwise
+    builds the index from the `run-*.ndjson` files. Returns
+    `file -> [tests]`.
+  - `entries` — backward-compat view derived from `reverse_index`,
+    returns `test -> [files]`. The latest line wins on duplicates.
+  - `consolidate(prune: false)` — writes `manifest.json` from the run
+    files. With `prune: true`, deletes the NDJSONs after the write.
+  - `consolidated?` — `true` if `manifest.json` exists.
+  - `clear!` — removes both the NDJSONs and `manifest.json`.
+- `Manifest::Writer`: opens `run-<Process.pid>.ndjson` in append mode
+  per worker. Since each forked worker has a distinct PID, **no
+  locking is required** — different files, no contention. The writer
+  normalizes paths to be relative to the project root and drops
+  anything outside it (gems, `/usr/lib`, etc.).
+
+NDJSON was chosen for the raw shape because it is append-friendly (no
+need to re-read and rewrite the whole JSON for each test) and pairs
+nicely with the PID-based filename for trivial parallelism.
+`manifest.json` is what consumers actually read — deduplicated and
+small.
 
 ### `Selector`
 Pure in-memory operation over `Manifest#entries`. Builds a reverse index
@@ -208,10 +243,10 @@ this is fine.
 
 ### `CLI`
 `OptionParser`-based, no external dependency. Subcommands: `select`,
-`info`, `clear`, `help`. `stdout` / `stderr` / `stdin` are injected for
-testing — no subprocess required. Returns an exit code (`EXIT_OK`,
-`EXIT_USAGE`, `EXIT_STRICT_UNKNOWN`); `exe/selective-tests` is just
-`exit(SelectiveTests::CLI.run(ARGV))`.
+`consolidate`, `info`, `clear`, `help`. `stdout` / `stderr` / `stdin`
+are injected for testing — no subprocess required. Returns an exit code
+(`EXIT_OK`, `EXIT_USAGE`, `EXIT_STRICT_UNKNOWN`); `exe/selective-tests`
+is just `exit(SelectiveTests::CLI.run(ARGV))`.
 
 ### Collection flow, step by step
 
@@ -305,7 +340,7 @@ single step to their PR workflow:
 |-------------------|-------------------------------------------------------------------------------------------------------|
 | `tests`           | Newline-separated list of selected test files (empty if none).                                        |
 | `test-count`      | Number of test files selected. `0` means no tests are affected.                                       |
-| `manifest-found`  | `true` if at least one `run-*.ndjson` was found; `false` means the caller must fall back.             |
+| `manifest-found`  | `true` if `manifest.json` or at least one `run-*.ndjson` is present; `false` means the caller falls back. |
 | `unknown-count`   | Number of diff files unknown to the manifest (conservatively skipped).                                |
 | `diff-file-count` | Number of files in the diff after applying `changed-files` or running `git diff`.                     |
 
@@ -329,10 +364,12 @@ workflow runs daily at 06:00 UTC, executes the full suite with
 back to `develop`. On every run it:
 
 1. checks out `develop`;
-2. wipes `.selective_tests/run-*.ndjson` to start clean;
+2. wipes `.selective_tests/run-*.ndjson` and `manifest.json` to start clean;
 3. builds the test image (same pipeline as the `Rails Tests` workflow);
 4. runs `resources/tests/run_all_tests.sh` with `TRACK_TEST_FILES=true`;
-5. runs `git add .selective_tests/`, commits and pushes (with
+5. runs `bundle exec selective-tests consolidate --prune` to fold the
+   NDJSONs into `manifest.json` and delete the raw run files;
+6. runs `git add .selective_tests/`, commits and pushes (with
    `pull --rebase` and retry, in case `develop` moved while the suite
    was running).
 

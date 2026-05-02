@@ -89,4 +89,97 @@ class ManifestTest < Minitest::Test
 
     assert_equal({ 'test/a_test.rb' => ['app/a.rb'] }, @manifest.entries)
   end
+
+  def test_index_inverts_test_to_files_into_file_to_tests
+    FileUtils.mkdir_p(@dir)
+    File.open(File.join(@dir, 'run-1.ndjson'), 'w') do |f|
+      f.puts JSON.generate(test: 'test/a_test.rb', files: ['app/shared.rb', 'app/a.rb'])
+      f.puts JSON.generate(test: 'test/b_test.rb', files: ['app/shared.rb', 'app/b.rb'])
+    end
+
+    assert_equal(
+      {
+        'app/a.rb'      => ['test/a_test.rb'],
+        'app/b.rb'      => ['test/b_test.rb'],
+        'app/shared.rb' => ['test/a_test.rb', 'test/b_test.rb']
+      },
+      @manifest.reverse_index
+    )
+  end
+
+  def test_consolidate_writes_manifest_json_with_inverted_index
+    FileUtils.mkdir_p(@dir)
+    File.open(File.join(@dir, 'run-1.ndjson'), 'w') do |f|
+      f.puts JSON.generate(test: 'test/a_test.rb', files: ['app/shared.rb', 'app/a.rb'])
+      f.puts JSON.generate(test: 'test/b_test.rb', files: ['app/shared.rb'])
+    end
+
+    path = @manifest.consolidate
+    assert_equal File.join(@dir, 'manifest.json'), path
+    assert @manifest.consolidated?
+
+    written = JSON.parse(File.read(path))
+    assert_equal(
+      {
+        'app/a.rb'      => ['test/a_test.rb'],
+        'app/shared.rb' => ['test/a_test.rb', 'test/b_test.rb']
+      },
+      written
+    )
+  end
+
+  def test_consolidate_with_prune_deletes_run_files
+    FileUtils.mkdir_p(@dir)
+    File.write(File.join(@dir, 'run-1.ndjson'),
+               JSON.generate(test: 'test/a_test.rb', files: ['app/a.rb']) + "\n")
+    File.write(File.join(@dir, 'run-2.ndjson'),
+               JSON.generate(test: 'test/b_test.rb', files: ['app/b.rb']) + "\n")
+
+    @manifest.consolidate(prune: true)
+
+    assert_empty Dir.glob(File.join(@dir, 'run-*.ndjson'))
+    assert File.exist?(File.join(@dir, 'manifest.json'))
+  end
+
+  def test_index_prefers_manifest_json_when_present
+    FileUtils.mkdir_p(@dir)
+    File.write(
+      File.join(@dir, 'manifest.json'),
+      JSON.generate('app/from_manifest.rb' => ['test/from_manifest_test.rb'])
+    )
+    File.write(File.join(@dir, 'run-1.ndjson'),
+               JSON.generate(test: 'test/ignored_test.rb', files: ['app/ignored.rb']) + "\n")
+
+    assert_equal(
+      { 'app/from_manifest.rb' => ['test/from_manifest_test.rb'] },
+      @manifest.reverse_index
+    )
+  end
+
+  def test_index_falls_back_to_runs_when_manifest_json_is_invalid
+    FileUtils.mkdir_p(@dir)
+    File.write(File.join(@dir, 'manifest.json'), 'not json')
+    File.write(File.join(@dir, 'run-1.ndjson'),
+               JSON.generate(test: 'test/a_test.rb', files: ['app/a.rb']) + "\n")
+
+    assert_equal({ 'app/a.rb' => ['test/a_test.rb'] }, @manifest.reverse_index)
+  end
+
+  def test_clear_also_removes_manifest_json
+    FileUtils.mkdir_p(@dir)
+    File.write(File.join(@dir, 'run-1.ndjson'), '')
+    File.write(File.join(@dir, 'manifest.json'), '{}')
+
+    @manifest.clear!
+
+    refute File.exist?(File.join(@dir, 'run-1.ndjson'))
+    refute File.exist?(File.join(@dir, 'manifest.json'))
+  end
+
+  def test_consolidated_predicate
+    refute @manifest.consolidated?
+    FileUtils.mkdir_p(@dir)
+    File.write(File.join(@dir, 'manifest.json'), '{}')
+    assert @manifest.consolidated?
+  end
 end

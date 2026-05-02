@@ -47,14 +47,7 @@ module SelectiveTests
     end
 
     def reverse_index
-      @reverse ||= begin
-        index = Hash.new { |h, k| h[k] = [] }
-        @manifest.entries.each do |test, files|
-          Array(files).each { |f| index[f] << test }
-        end
-        index.each_value(&:uniq!)
-        index
-      end
+      @reverse ||= @manifest.reverse_index
     end
   end
 end
