@@ -1,0 +1,78 @@
+name: V360 PR type
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, unlabeled, ready_for_review, edited]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: v360-pr-type-${{ github.event.pull_request.number || github.event.merge_group.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate PR classification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # No checkout: pull_request_target must never execute code from the PR.
+      - name: Require a V360 type label
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          event = json.load(open(os.environ['GITHUB_EVENT_PATH']))
+          repo = os.environ['GITHUB_REPOSITORY']
+          api = os.environ['GITHUB_API_URL']
+          allowed = {'Tipo - Bug', 'Tipo - Melhoria'}
+
+          def request(path, data=None):
+              payload = None if data is None else json.dumps(data).encode()
+              req = urllib.request.Request(api + path, data=payload, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                  'Content-Type': 'application/json',
+              })
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          if 'pull_request' in event:
+              # Read current labels; queued events may contain an outdated snapshot.
+              prs = [request(f'/repos/{repo}/pulls/{event["pull_request"]["number"]}')]
+              sha = prs[0]['head']['sha']
+          else:
+              sha = event['merge_group']['head_sha']
+              prs = []
+              page = 1
+              while True:
+                  batch = request(f'/repos/{repo}/commits/{sha}/pulls?per_page=100&page={page}')
+                  prs.extend(request(f'/repos/{repo}/pulls/{pr["number"]}') for pr in batch if pr['state'] == 'open')
+                  if len(batch) < 100:
+                      break
+                  page += 1
+
+          invalid = [pr['number'] for pr in prs
+                     if not allowed.intersection(label['name'] for label in pr['labels'])]
+          valid = bool(prs) and not invalid
+          description = ('PR classificado como bug ou melhoria.' if valid
+                         else 'Adicione Tipo - Bug ou Tipo - Melhoria ao PR.')
+          request(f'/repos/{repo}/statuses/{sha}', {
+              'state': 'success' if valid else 'failure',
+              'context': 'V360 / tipo de PR',
+              'description': description,
+              'target_url': f'{os.environ["GITHUB_SERVER_URL"]}/{repo}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+          })
+          if not valid:
+              print(f'::error::{description} PRs sem classificação: {invalid or "nenhum PR associado"}')
+              raise SystemExit(1)
+          print(description)
+          PY
